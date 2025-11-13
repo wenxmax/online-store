@@ -67,20 +67,20 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request) {
-        // 先检查是否是管理员用户
+        // First check if it's an admin user
         if (adminUsername.equals(request.getUsername())) {
-            // 如果是管理员，验证密码
+            // If it's an admin, verify password
             if (adminPassword.equals(request.getPassword())) {
-                logger.info("管理员快速登录");
+                logger.info("Admin quick login");
                 return createLoginResponse(request.getUsername());
             } else {
-                logger.warn("管理员密码错误");
+                logger.warn("Invalid admin password");
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
             }
         }
 
-        // 非管理员用户，调用user-service进行认证
+        // For non-admin users, call user-service for authentication
         String authUrl = UriComponentsBuilder.fromHttpUrl(userServiceBaseUrl)
             .path(AUTH_PATH)
             .toUriString();
@@ -95,14 +95,14 @@ public class UserServiceImpl implements UserService {
     }
 
     private LoginResponse createLoginResponse(String username) {
-        // 生成token
+        // Generate token
         String token = UUID.randomUUID().toString();
         LocalDateTime expireTime = LocalDateTime.now().plusDays(TOKEN_EXPIRE_DAYS);
 
-        // 查找或创建用户
+        // Find or create user
         User user = userMapper.findByUsername(username);
         if (user == null) {
-            // 用户不存在，创建新用户
+            // User does not exist, create new user
             user = new User();
             user.setUsername(username);
             user.setToken(token);
@@ -110,28 +110,28 @@ public class UserServiceImpl implements UserService {
             user.setCreatedAt(LocalDateTime.now());
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.insertUser(user);
-            logger.info("创建新用户: {}", username);
+            logger.info("Creating new user: {}", username);
         } else {
-            // 更新现有用户的token
+            // Update existing user's token
             user.setToken(token);
             user.setTokenExpireTime(expireTime);
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.updateUserToken(user);
-            logger.info("更新用户token: {}", username);
+            logger.info("Updating user token: {}", username);
         }
 
         try {
-            // 将用户信息转换为JSON并保存到Redis
+            // Convert user information to JSON and save to Redis
             String redisKey = TOKEN_PREFIX + token;
             String userJson = objectMapper.writeValueAsString(user);
             redisTemplate.opsForValue().set(redisKey, userJson, TOKEN_EXPIRE_DAYS, TimeUnit.DAYS);
-            logger.info("用户信息已缓存到Redis: {}", username);
+            logger.info("User information cached to Redis: {}", username);
         } catch (Exception e) {
-            logger.error("缓存用户信息失败", e);
-            // 继续处理，因为这不是致命错误
+            logger.error("Failed to cache user information", e);
+            // Continue processing as this is not a fatal error
         }
 
-        // 返回响应
+        // Return response
         LoginResponse response = new LoginResponse();
         response.setToken(token);
         response.setExpireTime(expireTime);
@@ -152,20 +152,20 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public PageResponse<UserVO> listUsers(UserPageRequest request) {
-        // 计算分页参数
+        // Calculate pagination parameters
         int offset = (request.getPageNum() - 1) * request.getPageSize();
         int limit = request.getPageSize();
 
-        // 查询数据
+        // Query data
         List<User> users = userMapper.findAllWithPagination(offset, limit);
         long total = userMapper.countTotal();
 
-        // 转换为VO
+        // Convert to VO
         List<UserVO> userVOs = users.stream()
                 .map(this::convertToVO)
                 .collect(Collectors.toList());
 
-        // 构建响应
+        // Build response
         PageResponse<UserVO> response = new PageResponse<>();
         response.setRecords(userVOs);
         response.setTotal(total);
@@ -181,12 +181,12 @@ public class UserServiceImpl implements UserService {
             String redisKey = TOKEN_PREFIX + token;
             String userJson = redisTemplate.opsForValue().get(redisKey);
             if (userJson == null) {
-                logger.warn("无效的token: {}", token);
+                logger.warn("Invalid token: {}", token);
                 return null;
             }
             return objectMapper.readValue(userJson, User.class);
         } catch (Exception e) {
-            logger.error("从Redis获取用户信息失败", e);
+            logger.error("Failed to retrieve user information from Redis", e);
             return null;
         }
     }

@@ -75,6 +75,8 @@ public class UserServiceImpl implements UserService {
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
+                // Record failed login attempts (global, not per user)
+                recordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
             }
@@ -87,6 +89,8 @@ public class UserServiceImpl implements UserService {
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
+            // Record failed login attempts (global, not per user)
+            recordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
         }
@@ -189,5 +193,18 @@ public class UserServiceImpl implements UserService {
             logger.error("Failed to retrieve user information from Redis", e);
             return null;
         }
+    }
+
+    /**
+     * Record failed login attempts, can be used for risk control if threshold is exceeded.
+     */
+    private void recordFailedLogin(String username) {
+        String key = "login:fail";
+        Long cnt = redisTemplate.opsForValue().increment(key);
+        if (cnt != null && cnt == 1) {
+            // Set expiration time
+            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        }
+        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
 } 

@@ -51,6 +51,7 @@ public class UserServiceImpl implements UserService {
     private static final String AUTH_PATH = "/auth";
     private static final String TOKEN_PREFIX = "token:";
     private static final long TOKEN_EXPIRE_DAYS = 1;
+    private static final long LOGIN_FAIL_EXPIRE_DAYS = 1;
 
     @Autowired
     private RestTemplate restTemplate;
@@ -75,7 +76,6 @@ public class UserServiceImpl implements UserService {
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
-                // Record failed login attempts (global, not per user)
                 recordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
@@ -89,7 +89,6 @@ public class UserServiceImpl implements UserService {
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
-            // Record failed login attempts (global, not per user)
             recordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
@@ -195,16 +194,16 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * Record failed login attempts, can be used for risk control if threshold is exceeded.
-     */
     private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        try {
+            String key = "login:fail:" + (username == null ? "unknown" : username);
+            Long cnt = redisTemplate.opsForValue().increment(key);
+            if (cnt != null && cnt == 1) {
+                redisTemplate.expire(key, LOGIN_FAIL_EXPIRE_DAYS, TimeUnit.DAYS);
+            }
+            logger.debug("Record failed login attempt {} -> {}", username, cnt);
+        } catch (Exception e) {
+            logger.warn("Failed to record failed login", e);
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
-} 
+}

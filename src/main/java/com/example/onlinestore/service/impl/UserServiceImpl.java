@@ -199,12 +199,11 @@ public class UserServiceImpl implements UserService {
      * Record failed login attempts, can be used for risk control if threshold is exceeded.
      */
     private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        String key = "login:fail:" + username;
+        Boolean created = redisTemplate.opsForValue().setIfAbsent(key, "1", 1, TimeUnit.DAYS);
+        if (Boolean.FALSE.equals(created)) {
+            redisTemplate.opsForValue().increment(key);
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
+        logger.debug("Failed login count updated");
     }
-} 
+}

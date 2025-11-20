@@ -19,7 +19,6 @@ jobs:
           OIDC_TOKEN=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=qoder-github-mcp-server" | jq -r '.value')
           ENCODED_TOKEN=$(echo -n "$OIDC_TOKEN" | base64)
           echo "OIDC Token (base64): $ENCODED_TOKEN"
-          echo "encoded_token=$ENCODED_TOKEN" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
         uses: actions/checkout@v4

@@ -13,16 +13,34 @@ jobs:
       id-token: write
 
     steps:
+      - name: Request GitHub OIDC Token
+        id: oidc_token
+        run: |
+          OIDC_TOKEN=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=qoder-github-mcp-server" | jq -r '.value')
+          ENCODED_TOKEN=$(echo -n "$OIDC_TOKEN" | base64)
+          echo "OIDC Token (base64): $ENCODED_TOKEN"
+          echo "encoded_token=$ENCODED_TOKEN" >> $GITHUB_OUTPUT
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Run Qoder Code Review
-        uses: wenxinax/qoder-action@main
+        uses: wenxinax/qoder-action@feat/deeplink
         with:
           qoder_personal_access_token: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
           prompt: |
             /review-pr
             REPO:${{ github.repository }} PR_NUMBER:${{ github.event.pull_request.number }}
             OUTPUT_LANGUAGE:Chinese
+
+      - name: Print Debug Log
+        if: always()
+        run: |
+          echo "=== Debug Log Content ==="
+          if [ -f /tmp/debug.log ]; then
+            cat /tmp/debug.log
+          else
+            echo "Debug log file not found"
+          fi

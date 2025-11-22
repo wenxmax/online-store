@@ -192,16 +192,6 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    private static String maskUsername(String username) {
-        if (username == null || username.isEmpty()) {
-            return "";
-        }
-        if (username.length() <= 2) {
-            return "*";
-        }
-        return username.charAt(0) + "***" + username.charAt(username.length() - 1);
-    }
-
     private static String sha256(String input) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
@@ -226,7 +216,7 @@ public class UserServiceImpl implements UserService {
         byte[] luaBytes = lua.getBytes(StandardCharsets.UTF_8);
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         byte[] ttlMsBytes = String.valueOf(TimeUnit.DAYS.toMillis(1)).getBytes(StandardCharsets.UTF_8);
-        Long cnt = redisTemplate.execute(connection -> connection.eval(luaBytes, ReturnType.INTEGER, 1, keyBytes, ttlMsBytes), true);
+        Long cnt = redisTemplate.execute(connection -> connection.eval(luaBytes, ReturnType.INTEGER, 1, keyBytes, ttlMsBytes));
         logger.debug("Record failed login attempt -> {}", cnt);
     }
 }

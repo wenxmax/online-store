@@ -17,12 +17,17 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.MessageSource;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -51,6 +56,7 @@ public class UserServiceImpl implements UserService {
     private static final String AUTH_PATH = "/auth";
     private static final String TOKEN_PREFIX = "token:";
     private static final long TOKEN_EXPIRE_DAYS = 1;
+    private static final long LOGIN_FAIL_TTL_MILLIS = TimeUnit.DAYS.toMillis(1);
 
     @Autowired
     private RestTemplate restTemplate;
@@ -67,46 +73,40 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request) {
-        // First check if it's an admin user
         if (adminUsername.equals(request.getUsername())) {
-            // If it's an admin, verify password
             if (adminPassword.equals(request.getPassword())) {
                 logger.info("Admin quick login");
+                resetFailedLogin(request.getUsername());
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
-                // Record failed login attempts (global, not per user)
                 recordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
             }
         }
 
-        // For non-admin users, call user-service for authentication
         String authUrl = UriComponentsBuilder.fromHttpUrl(userServiceBaseUrl)
             .path(AUTH_PATH)
             .toUriString();
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
-            // Record failed login attempts (global, not per user)
             recordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
         }
 
+        resetFailedLogin(request.getUsername());
         return createLoginResponse(request.getUsername());
     }
 
     private LoginResponse createLoginResponse(String username) {
-        // Generate token
         String token = UUID.randomUUID().toString();
         LocalDateTime expireTime = LocalDateTime.now().plusDays(TOKEN_EXPIRE_DAYS);
 
-        // Find or create user
         User user = userMapper.findByUsername(username);
         if (user == null) {
-            // User does not exist, create new user
             user = new User();
             user.setUsername(username);
             user.setToken(token);
@@ -114,28 +114,24 @@ public class UserServiceImpl implements UserService {
             user.setCreatedAt(LocalDateTime.now());
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.insertUser(user);
-            logger.info("Creating new user: {}", username);
+            logger.info("Creating new user");
         } else {
-            // Update existing user's token
             user.setToken(token);
             user.setTokenExpireTime(expireTime);
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.updateUserToken(user);
-            logger.info("Updating user token: {}", username);
+            logger.info("Updating user token");
         }
 
         try {
-            // Convert user information to JSON and save to Redis
             String redisKey = TOKEN_PREFIX + token;
             String userJson = objectMapper.writeValueAsString(user);
             redisTemplate.opsForValue().set(redisKey, userJson, TOKEN_EXPIRE_DAYS, TimeUnit.DAYS);
-            logger.info("User information cached to Redis: {}", username);
+            logger.info("User information cached to Redis");
         } catch (Exception e) {
             logger.error("Failed to cache user information", e);
-            // Continue processing as this is not a fatal error
         }
 
-        // Return response
         LoginResponse response = new LoginResponse();
         response.setToken(token);
         response.setExpireTime(expireTime);
@@ -156,20 +152,16 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public PageResponse<UserVO> listUsers(UserPageRequest request) {
-        // Calculate pagination parameters
         int offset = (request.getPageNum() - 1) * request.getPageSize();
         int limit = request.getPageSize();
 
-        // Query data
         List<User> users = userMapper.findAllWithPagination(offset, limit);
         long total = userMapper.countTotal();
 
-        // Convert to VO
         List<UserVO> userVOs = users.stream()
                 .map(this::convertToVO)
                 .collect(Collectors.toList());
 
-        // Build response
         PageResponse<UserVO> response = new PageResponse<>();
         response.setRecords(userVOs);
         response.setTotal(total);
@@ -185,7 +177,7 @@ public class UserServiceImpl implements UserService {
             String redisKey = TOKEN_PREFIX + token;
             String userJson = redisTemplate.opsForValue().get(redisKey);
             if (userJson == null) {
-                logger.warn("Invalid token: {}", token);
+                logger.warn("Invalid token");
                 return null;
             }
             return objectMapper.readValue(userJson, User.class);
@@ -195,16 +187,41 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * Record failed login attempts, can be used for risk control if threshold is exceeded.
-     */
     private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        try {
+            String key = userFailKey(username);
+            String scriptText = "local c=redis.call('INCR', KEYS[1]); redis.call('PEXPIRE', KEYS[1], ARGV[1]); return c";
+            RedisScript<Long> script = new DefaultRedisScript<>(scriptText, Long.class);
+            Long cnt = redisTemplate.execute(script, Collections.singletonList(key), String.valueOf(LOGIN_FAIL_TTL_MILLIS));
+            logger.debug("Recorded failed login count {}", cnt);
+        } catch (Exception e) {
+            logger.warn("Failed to record login failure", e);
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
-} 
+
+    private void resetFailedLogin(String username) {
+        try {
+            redisTemplate.delete(userFailKey(username));
+        } catch (Exception e) {
+            logger.warn("Failed to reset login failure counter", e);
+        }
+    }
+
+    private String userFailKey(String username) {
+        return "login:fail:user:" + sha256Hex(username == null ? "" : username);
+    }
+
+    private static String sha256Hex(String s) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(s.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+}

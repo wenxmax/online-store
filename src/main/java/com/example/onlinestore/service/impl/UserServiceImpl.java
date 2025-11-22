@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.MessageSource;
 import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -222,7 +223,10 @@ public class UserServiceImpl implements UserService {
         String subjectHash = sha256(normalized);
         String key = "login:fail:user:" + subjectHash;
         String lua = "local c = redis.call('INCR', KEYS[1]); if c == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]); end return c";
-        Long cnt = redisTemplate.execute((connection) -> connection.scriptingCommands().eval(lua.getBytes(StandardCharsets.UTF_8), ReturnType.INTEGER, 1, key.getBytes(StandardCharsets.UTF_8), String.valueOf(TimeUnit.DAYS.toMillis(1)).getBytes(StandardCharsets.UTF_8)), true);
+        byte[] luaBytes = lua.getBytes(StandardCharsets.UTF_8);
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        byte[] ttlMsBytes = String.valueOf(TimeUnit.DAYS.toMillis(1)).getBytes(StandardCharsets.UTF_8);
+        Long cnt = redisTemplate.execute(connection -> connection.eval(luaBytes, ReturnType.INTEGER, 1, keyBytes, ttlMsBytes), true);
         logger.debug("Record failed login attempt -> {}", cnt);
     }
 }

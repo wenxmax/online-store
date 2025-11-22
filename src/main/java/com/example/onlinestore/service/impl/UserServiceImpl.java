@@ -51,6 +51,9 @@ public class UserServiceImpl implements UserService {
     private static final String AUTH_PATH = "/auth";
     private static final String TOKEN_PREFIX = "token:";
     private static final long TOKEN_EXPIRE_DAYS = 1;
+    private static final String FAIL_KEY_PREFIX = "login:fail:user:";
+    private static final long FAIL_TTL_MINUTES = 1440;
+    private static final int FAIL_THRESHOLD = 5;
 
     @Autowired
     private RestTemplate restTemplate;
@@ -67,46 +70,43 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request) {
-        // First check if it's an admin user
+        String username = request.getUsername();
+        if (isLockedOut(username)) {
+            throw new IllegalArgumentException(messageSource.getMessage("error.too.many.attempts", null, "Too many failed attempts. Try again later.", LocaleContextHolder.getLocale()));
+        }
         if (adminUsername.equals(request.getUsername())) {
-            // If it's an admin, verify password
             if (adminPassword.equals(request.getPassword())) {
                 logger.info("Admin quick login");
+                resetFailedLogin(request.getUsername());
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
-                // Record failed login attempts (global, not per user)
                 recordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
             }
         }
 
-        // For non-admin users, call user-service for authentication
         String authUrl = UriComponentsBuilder.fromHttpUrl(userServiceBaseUrl)
             .path(AUTH_PATH)
             .toUriString();
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
-            // Record failed login attempts (global, not per user)
             recordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
         }
-
+        resetFailedLogin(request.getUsername());
         return createLoginResponse(request.getUsername());
     }
 
     private LoginResponse createLoginResponse(String username) {
-        // Generate token
         String token = UUID.randomUUID().toString();
         LocalDateTime expireTime = LocalDateTime.now().plusDays(TOKEN_EXPIRE_DAYS);
 
-        // Find or create user
         User user = userMapper.findByUsername(username);
         if (user == null) {
-            // User does not exist, create new user
             user = new User();
             user.setUsername(username);
             user.setToken(token);
@@ -116,7 +116,6 @@ public class UserServiceImpl implements UserService {
             userMapper.insertUser(user);
             logger.info("Creating new user: {}", username);
         } else {
-            // Update existing user's token
             user.setToken(token);
             user.setTokenExpireTime(expireTime);
             user.setUpdatedAt(LocalDateTime.now());
@@ -125,17 +124,14 @@ public class UserServiceImpl implements UserService {
         }
 
         try {
-            // Convert user information to JSON and save to Redis
             String redisKey = TOKEN_PREFIX + token;
             String userJson = objectMapper.writeValueAsString(user);
             redisTemplate.opsForValue().set(redisKey, userJson, TOKEN_EXPIRE_DAYS, TimeUnit.DAYS);
             logger.info("User information cached to Redis: {}", username);
         } catch (Exception e) {
             logger.error("Failed to cache user information", e);
-            // Continue processing as this is not a fatal error
         }
 
-        // Return response
         LoginResponse response = new LoginResponse();
         response.setToken(token);
         response.setExpireTime(expireTime);
@@ -156,20 +152,16 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public PageResponse<UserVO> listUsers(UserPageRequest request) {
-        // Calculate pagination parameters
         int offset = (request.getPageNum() - 1) * request.getPageSize();
         int limit = request.getPageSize();
 
-        // Query data
         List<User> users = userMapper.findAllWithPagination(offset, limit);
         long total = userMapper.countTotal();
 
-        // Convert to VO
         List<UserVO> userVOs = users.stream()
                 .map(this::convertToVO)
                 .collect(Collectors.toList());
 
-        // Build response
         PageResponse<UserVO> response = new PageResponse<>();
         response.setRecords(userVOs);
         response.setTotal(total);
@@ -195,16 +187,44 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * Record failed login attempts, can be used for risk control if threshold is exceeded.
-     */
     private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        try {
+            String key = failKey(username);
+            redisTemplate.opsForValue().setIfAbsent(key, "0", FAIL_TTL_MINUTES, TimeUnit.MINUTES);
+            Long cnt = redisTemplate.opsForValue().increment(key);
+            Long ttl = redisTemplate.getExpire(key, TimeUnit.MINUTES);
+            if (ttl == null || ttl <= 0) {
+                redisTemplate.expire(key, FAIL_TTL_MINUTES, TimeUnit.MINUTES);
+            }
+            logger.debug("Recorded failed login attempt, count={}", cnt);
+        } catch (Exception e) {
+            logger.warn("Failed to record login fail counter", e);
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
-} 
+
+    private void resetFailedLogin(String username) {
+        try {
+            redisTemplate.delete(failKey(username));
+        } catch (Exception e) {
+            logger.warn("Failed to reset login fail counter", e);
+        }
+    }
+
+    private boolean isLockedOut(String username) {
+        try {
+            String v = redisTemplate.opsForValue().get(failKey(username));
+            if (v == null) {
+                return false;
+            }
+            long cnt = Long.parseLong(v);
+            return cnt >= FAIL_THRESHOLD;
+        } catch (Exception e) {
+            logger.warn("Failed to read login fail counter", e);
+            return false;
+        }
+    }
+
+    private String failKey(String username) {
+        return FAIL_KEY_PREFIX + username;
+    }
+}

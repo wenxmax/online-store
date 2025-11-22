@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.MessageSource;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.Collections;
 
 @Service
 public class UserServiceImpl implements UserService {
@@ -75,7 +77,6 @@ public class UserServiceImpl implements UserService {
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
-                // Record failed login attempts (global, not per user)
                 recordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
@@ -89,7 +90,6 @@ public class UserServiceImpl implements UserService {
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
-            // Record failed login attempts (global, not per user)
             recordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
@@ -195,16 +195,24 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * Record failed login attempts, can be used for risk control if threshold is exceeded.
-     */
     private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        try {
+            String key = "auth:fail:user:" + username;
+            String scriptText = "local exists=redis.call('EXISTS', KEYS[1]) " +
+                                "local cnt=redis.call('INCR', KEYS[1]) " +
+                                "if exists==0 then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1])) end " +
+                                "return cnt";
+            DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+            script.setScriptText(scriptText);
+            script.setResultType(Long.class);
+            Long cnt = redisTemplate.execute(
+                    script,
+                    Collections.singletonList(key),
+                    String.valueOf(86400)
+            );
+            logger.debug("Record failed login attempt {} -> {}", username, cnt);
+        } catch (Exception e) {
+            logger.warn("Failed to record failed login attempt for {}", username, e);
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
-} 
+}

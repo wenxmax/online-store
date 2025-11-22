@@ -22,7 +22,11 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.Formatter;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -67,30 +71,25 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request) {
-        // First check if it's an admin user
         if (adminUsername.equals(request.getUsername())) {
-            // If it's an admin, verify password
             if (adminPassword.equals(request.getPassword())) {
                 logger.info("Admin quick login");
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
-                // Record failed login attempts (global, not per user)
-                recordFailedLogin(request.getUsername());
+                safeRecordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
             }
         }
 
-        // For non-admin users, call user-service for authentication
         String authUrl = UriComponentsBuilder.fromHttpUrl(userServiceBaseUrl)
             .path(AUTH_PATH)
             .toUriString();
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
-            // Record failed login attempts (global, not per user)
-            recordFailedLogin(request.getUsername());
+            safeRecordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
         }
@@ -99,14 +98,11 @@ public class UserServiceImpl implements UserService {
     }
 
     private LoginResponse createLoginResponse(String username) {
-        // Generate token
         String token = UUID.randomUUID().toString();
         LocalDateTime expireTime = LocalDateTime.now().plusDays(TOKEN_EXPIRE_DAYS);
 
-        // Find or create user
         User user = userMapper.findByUsername(username);
         if (user == null) {
-            // User does not exist, create new user
             user = new User();
             user.setUsername(username);
             user.setToken(token);
@@ -114,28 +110,24 @@ public class UserServiceImpl implements UserService {
             user.setCreatedAt(LocalDateTime.now());
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.insertUser(user);
-            logger.info("Creating new user: {}", username);
+            logger.info("Creating new user");
         } else {
-            // Update existing user's token
             user.setToken(token);
             user.setTokenExpireTime(expireTime);
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.updateUserToken(user);
-            logger.info("Updating user token: {}", username);
+            logger.info("Updating user token");
         }
 
         try {
-            // Convert user information to JSON and save to Redis
             String redisKey = TOKEN_PREFIX + token;
             String userJson = objectMapper.writeValueAsString(user);
             redisTemplate.opsForValue().set(redisKey, userJson, TOKEN_EXPIRE_DAYS, TimeUnit.DAYS);
-            logger.info("User information cached to Redis: {}", username);
+            logger.info("User information cached to Redis");
         } catch (Exception e) {
             logger.error("Failed to cache user information", e);
-            // Continue processing as this is not a fatal error
         }
 
-        // Return response
         LoginResponse response = new LoginResponse();
         response.setToken(token);
         response.setExpireTime(expireTime);
@@ -156,20 +148,16 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public PageResponse<UserVO> listUsers(UserPageRequest request) {
-        // Calculate pagination parameters
         int offset = (request.getPageNum() - 1) * request.getPageSize();
         int limit = request.getPageSize();
 
-        // Query data
         List<User> users = userMapper.findAllWithPagination(offset, limit);
         long total = userMapper.countTotal();
 
-        // Convert to VO
         List<UserVO> userVOs = users.stream()
                 .map(this::convertToVO)
                 .collect(Collectors.toList());
 
-        // Build response
         PageResponse<UserVO> response = new PageResponse<>();
         response.setRecords(userVOs);
         response.setTotal(total);
@@ -185,7 +173,7 @@ public class UserServiceImpl implements UserService {
             String redisKey = TOKEN_PREFIX + token;
             String userJson = redisTemplate.opsForValue().get(redisKey);
             if (userJson == null) {
-                logger.warn("Invalid token: {}", token);
+                logger.warn("Invalid token");
                 return null;
             }
             return objectMapper.readValue(userJson, User.class);
@@ -195,16 +183,46 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * Record failed login attempts, can be used for risk control if threshold is exceeded.
-     */
-    private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+    private void safeRecordFailedLogin(String username) {
+        try {
+            recordFailedLogin(username);
+        } catch (Exception e) {
+            logger.warn("Failed to record failed login", e);
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
-} 
+
+    private static String maskUsername(String username) {
+        if (username == null || username.isEmpty()) {
+            return "";
+        }
+        if (username.length() <= 2) {
+            return "*";
+        }
+        return username.charAt(0) + "***" + username.charAt(username.length() - 1);
+    }
+
+    private static String sha256(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            Formatter formatter = new Formatter();
+            for (byte b : hash) {
+                formatter.format("%02x", b);
+            }
+            String result = formatter.toString();
+            formatter.close();
+            return result;
+        } catch (NoSuchAlgorithmException e) {
+            return "";
+        }
+    }
+
+    private void recordFailedLogin(String username) {
+        String normalized = username == null ? "" : username.trim().toLowerCase();
+        String subjectHash = sha256(normalized);
+        String key = "login:fail:user:" + subjectHash;
+        String lua = "local c = redis.call('INCR', KEYS[1]); if c == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]); end return c";
+        Long cnt = redisTemplate.execute((connection) -> connection.scriptingCommands().eval(lua.getBytes(StandardCharsets.UTF_8), ReturnType.INTEGER, 1, key.getBytes(StandardCharsets.UTF_8), String.valueOf(TimeUnit.DAYS.toMillis(1)).getBytes(StandardCharsets.UTF_8)), true);
+        logger.debug("Record failed login attempt -> {}", cnt);
+    }
+}

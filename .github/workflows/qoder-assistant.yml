@@ -52,10 +52,10 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Run Qoder Assistant
-        uses: wenxinax/qoder-action@main
+        uses: QoderAI/qoder-action@v0
         with:
           qoder_personal_access_token: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
           prompt: |
             /assistant
             ${{ steps.build_args.outputs.args }}
-            OUTPUT_LANGUAGE:Chinese
+            OUTPUT_LANGUAGE:English

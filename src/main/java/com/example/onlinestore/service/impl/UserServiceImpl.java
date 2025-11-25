@@ -67,29 +67,24 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request) {
-        // First check if it's an admin user
         if (adminUsername.equals(request.getUsername())) {
-            // If it's an admin, verify password
             if (adminPassword.equals(request.getPassword())) {
                 logger.info("Admin quick login");
                 return createLoginResponse(request.getUsername());
             } else {
                 logger.warn("Invalid admin password");
-                // Record failed login attempts (global, not per user)
                 recordFailedLogin(request.getUsername());
                 throw new IllegalArgumentException(messageSource.getMessage(
                     "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
             }
         }
 
-        // For non-admin users, call user-service for authentication
         String authUrl = UriComponentsBuilder.fromHttpUrl(userServiceBaseUrl)
             .path(AUTH_PATH)
             .toUriString();
         Boolean isAuthenticated = restTemplate.postForObject(authUrl, request, Boolean.class);
         
         if (isAuthenticated == null || !isAuthenticated) {
-            // Record failed login attempts (global, not per user)
             recordFailedLogin(request.getUsername());
             throw new IllegalArgumentException(messageSource.getMessage(
                 "error.invalid.credentials", null, LocaleContextHolder.getLocale()));
@@ -99,14 +94,11 @@ public class UserServiceImpl implements UserService {
     }
 
     private LoginResponse createLoginResponse(String username) {
-        // Generate token
         String token = UUID.randomUUID().toString();
         LocalDateTime expireTime = LocalDateTime.now().plusDays(TOKEN_EXPIRE_DAYS);
 
-        // Find or create user
         User user = userMapper.findByUsername(username);
         if (user == null) {
-            // User does not exist, create new user
             user = new User();
             user.setUsername(username);
             user.setToken(token);
@@ -114,28 +106,24 @@ public class UserServiceImpl implements UserService {
             user.setCreatedAt(LocalDateTime.now());
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.insertUser(user);
-            logger.info("Creating new user: {}", username);
+            logger.info("Creating new user");
         } else {
-            // Update existing user's token
             user.setToken(token);
             user.setTokenExpireTime(expireTime);
             user.setUpdatedAt(LocalDateTime.now());
             userMapper.updateUserToken(user);
-            logger.info("Updating user token: {}", username);
+            logger.info("Updating user token");
         }
 
         try {
-            // Convert user information to JSON and save to Redis
             String redisKey = TOKEN_PREFIX + token;
             String userJson = objectMapper.writeValueAsString(user);
             redisTemplate.opsForValue().set(redisKey, userJson, TOKEN_EXPIRE_DAYS, TimeUnit.DAYS);
-            logger.info("User information cached to Redis: {}", username);
+            logger.info("User information cached to Redis");
         } catch (Exception e) {
             logger.error("Failed to cache user information", e);
-            // Continue processing as this is not a fatal error
         }
 
-        // Return response
         LoginResponse response = new LoginResponse();
         response.setToken(token);
         response.setExpireTime(expireTime);
@@ -156,20 +144,16 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public PageResponse<UserVO> listUsers(UserPageRequest request) {
-        // Calculate pagination parameters
         int offset = (request.getPageNum() - 1) * request.getPageSize();
         int limit = request.getPageSize();
 
-        // Query data
         List<User> users = userMapper.findAllWithPagination(offset, limit);
         long total = userMapper.countTotal();
 
-        // Convert to VO
         List<UserVO> userVOs = users.stream()
                 .map(this::convertToVO)
-                .collect(Collectors.toList());
+                .collect(java.util.stream.Collectors.toList());
 
-        // Build response
         PageResponse<UserVO> response = new PageResponse<>();
         response.setRecords(userVOs);
         response.setTotal(total);
@@ -185,7 +169,7 @@ public class UserServiceImpl implements UserService {
             String redisKey = TOKEN_PREFIX + token;
             String userJson = redisTemplate.opsForValue().get(redisKey);
             if (userJson == null) {
-                logger.warn("Invalid token: {}", token);
+                logger.warn("Invalid token");
                 return null;
             }
             return objectMapper.readValue(userJson, User.class);
@@ -195,16 +179,19 @@ public class UserServiceImpl implements UserService {
         }
     }
 
-    /**
-     * Record failed login attempts, can be used for risk control if threshold is exceeded.
-     */
     private void recordFailedLogin(String username) {
-        String key = "login:fail";
-        Long cnt = redisTemplate.opsForValue().increment(key);
-        if (cnt != null && cnt == 1) {
-            // Set expiration time
-            redisTemplate.expire(key, 1, TimeUnit.DAYS);
+        String key = "login:fail:user:" + username;
+        try {
+            String script = "local c=redis.call('INCR', KEYS[1]); if c==1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]); end; return c";
+            org.springframework.data.redis.core.script.DefaultRedisScript<Long> rs = new org.springframework.data.redis.core.script.DefaultRedisScript<>();
+            rs.setScriptText(script);
+            rs.setResultType(Long.class);
+            Long cnt = redisTemplate.execute(rs, java.util.Collections.singletonList(key),
+                    String.valueOf(java.util.concurrent.TimeUnit.DAYS.toMillis(1)));
+            if (cnt != null) {
+                logger.debug("Failed login count updated {}", cnt);
+            }
+        } catch (Exception ignored) {
         }
-        logger.debug("Record failed login attempt {} -> {}", username, cnt);
     }
-} 
+}

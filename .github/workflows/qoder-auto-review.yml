@@ -32,7 +32,7 @@ jobs:
           prompt: |
             /review-pr
             REPO:${{ github.repository }} PR_NUMBER:${{ github.event.pull_request.number }}
-            OUTPUT_LANGUAGE:Chinese
+            OUTPUT_LANGUAGE:English
 
       - name: Print Debug Log
         if: always()

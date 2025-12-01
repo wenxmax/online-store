@@ -26,7 +26,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Qoder Code Review
-        uses: wenxinax/qoder-action@feat/deeplink
+        uses: QoderAI/qoder-action@v0.1.0-beta.2
         with:
           qoder_personal_access_token: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
           prompt: |

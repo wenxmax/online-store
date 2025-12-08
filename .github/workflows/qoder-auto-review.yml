@@ -38,3 +38,9 @@ jobs:
           else
             echo "Log file not found at expected path."
           fi
+      - name: Debug Info
+        if: always()
+        run: |
+          uname -a
+          ldd --version
+          ldd $(which qodercli)

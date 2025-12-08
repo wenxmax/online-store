@@ -20,6 +20,8 @@ jobs:
 
       - name: Run Qoder Code Review
         uses: wenxinax/qoder-action@chore/bump-qodercli-version
+        env:
+          GOTRACEBACK: "system"
         with:
           qoder_personal_access_token: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
           prompt: |

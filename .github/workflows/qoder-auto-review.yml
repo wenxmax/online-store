@@ -28,3 +28,13 @@ jobs:
             /review-pr
             REPO:${{ github.repository }} PR_NUMBER:${{ github.event.pull_request.number }}
             OUTPUT_LANGUAGE:English
+
+      - name: Print Qoder Debug Log
+        if: always()
+        run: |
+          echo "Displaying logs from: $HOME/.qoder/logs/qodercli.log"
+          if [ -f "$HOME/.qoder/logs/qodercli.log" ]; then
+            cat "$HOME/.qoder/logs/qodercli.log"
+          else
+            echo "Log file not found at expected path."
+          fi

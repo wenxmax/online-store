@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Qoder Code Review
-        uses: wenxinax/qoder-action@chore/bump-qodercli-version
+        uses: wenxinax/qoder-action@feature/bump-qodercli-version-0.1.18
         env:
           GOTRACEBACK: "system"
         with:
@@ -38,9 +38,3 @@ jobs:
           else
             echo "Log file not found at expected path."
           fi
-      - name: Debug Info
-        if: always()
-        run: |
-          uname -a
-          ldd --version
-          ldd $(which qodercli)

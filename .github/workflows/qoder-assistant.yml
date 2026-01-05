@@ -52,7 +52,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Run Qoder Assistant
-        uses: wenxinax/qoder-action@chore/bump-qodercli-version
+        uses: wenxinax/qoder-action@feature/bump-qodercli-version-0.1.18
         with:
           qoder_personal_access_token: ${{ secrets.QODER_PERSONAL_ACCESS_TOKEN }}
           prompt: |
